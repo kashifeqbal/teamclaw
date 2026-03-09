@@ -76,8 +76,16 @@ if [ -n "$CONFIG_FILE" ] && [ -f "$CONFIG_FILE" ]; then
   # Confirm opt-in features
   if [[ "${INSTALL_WATCHCLAW:-n}" == "y" ]]; then
     echo "  WatchClaw: ✅ (from config)"
+    if [ -z "${WATCHCLAW_TELEGRAM_TOKEN:-}" ]; then
+      read -rp "  WatchClaw Telegram bot token (blank to skip alerts): " WATCHCLAW_TELEGRAM_TOKEN
+      read -rp "  WatchClaw Telegram chat ID (e.g. -1001234567890): " WATCHCLAW_CHAT_ID
+    fi
   else
     read -rp "  Install WatchClaw security? [y/N]: " INSTALL_WATCHCLAW
+    if [[ "${INSTALL_WATCHCLAW,,}" == "y" ]]; then
+      read -rp "  WatchClaw Telegram bot token (blank to skip alerts): " WATCHCLAW_TELEGRAM_TOKEN
+      read -rp "  WatchClaw Telegram chat ID (e.g. -1001234567890): " WATCHCLAW_CHAT_ID
+    fi
   fi
 
   if [[ "${INSTALL_HINDSIGHT:-n}" == "y" ]]; then
@@ -237,26 +245,10 @@ else
   skip "Docker skipped"
 fi
 
-# ═══════════════════════════════════════════════════════════════
-# PHASE 2: Create dedicated user
-# ═══════════════════════════════════════════════════════════════
 
-next_step; log "[$STEP/$TOTAL_STEPS] Creating user: root..."
-if ! id "root" &>/dev/null; then
-  useradd -m -s "$(which zsh)" -G sudo "root"
-  # Lock password — key-only SSH
-  passwd -l "root" 2>/dev/null
-  ok "User root created (zsh, no password)"
-else
-  skip "User root already exists"
-fi
-
-# Enable lingering — services survive SSH disconnect
-loginctl enable-linger "root" 2>/dev/null || true
-ok "loginctl linger enabled"
 
 # ═══════════════════════════════════════════════════════════════
-# PHASE 3: Dotfiles (as openclaw user)
+# PHASE 3: Dotfiles
 # ═══════════════════════════════════════════════════════════════
 
 next_step; log "[$STEP/$TOTAL_STEPS] Dotfiles (server-dotfiles)..."
@@ -479,7 +471,7 @@ else
 fi
 
 # ═══════════════════════════════════════════════════════════════
-# PHASE 6: OpenClaw Workspace (as openclaw user)
+# PHASE 6: OpenClaw Workspace
 # ═══════════════════════════════════════════════════════════════
 
 next_step; log "[$STEP/$TOTAL_STEPS] Creating workspace & agent..."
@@ -687,12 +679,6 @@ fi
 
 next_step; log "[$STEP/$TOTAL_STEPS] Installing systemd services..."
 
-# Get the user's UID for systemd path
-OC_UID=$(id -u "root")
-OC_RUNTIME="/run/user/$(id -u)"
-
-# Ensure user runtime dir exists
-mkdir -p "${OC_RUNTIME}" 2>/dev/null || true
 
 # Gateway service (system-level, running as root)
 cat > /etc/systemd/system/openclaw-gateway.service << SVC
@@ -751,12 +737,11 @@ cat > "${OC_WORKSPACE}/scripts/healthcheck.sh" << HCEOF
 #!/bin/bash
 # TeamClaw Healthcheck
 ERRORS=0
-OC_UID=$(id -u)
 
 # Gateway
-if ! XDG_RUNTIME_DIR=/run/user/\$(id -u) systemctl --user is-active openclaw-gateway &>/dev/null; then
+if ! systemctl is-active openclaw-gateway &>/dev/null; then
   echo "❌ Gateway down — restarting..."
-  XDG_RUNTIME_DIR=/run/user/\$(id -u) systemctl --user restart openclaw-gateway
+  systemctl restart openclaw-gateway
   ERRORS=\$((ERRORS + 1))
 fi
 
@@ -785,7 +770,7 @@ CRON_LINE="*/10 * * * * ${OC_WORKSPACE}/scripts/healthcheck.sh >> /var/log/teamc
 ok "Healthcheck cron (every 10 min)"
 
 # ═══════════════════════════════════════════════════════════════
-# PHASE 14: Cloudflare Tunnel (optional — MUST come before WatchClaw)
+# PHASE 11: Cloudflare Tunnel (optional — MUST come before WatchClaw)
 # ═══════════════════════════════════════════════════════════════
 
 if [ -n "${CLOUDFLARE_TUNNEL_TOKEN}" ]; then
@@ -808,7 +793,7 @@ if [ -n "${CLOUDFLARE_TUNNEL_TOKEN}" ]; then
 fi
 
 # ═══════════════════════════════════════════════════════════════
-# PHASE 15: Hindsight PageIndex (optional — session memory)
+# PHASE 12: Hindsight PageIndex (optional — session memory)
 # ═══════════════════════════════════════════════════════════════
 
 if [[ "${INSTALL_HINDSIGHT,,}" == "y" ]]; then
@@ -973,7 +958,7 @@ HSVC
 fi
 
 # ═══════════════════════════════════════════════════════════════
-# PHASE 17: WatchClaw Security Monitoring (optional)
+# PHASE 13: WatchClaw Security Monitoring (optional)
 # ═══════════════════════════════════════════════════════════════
 
 if [[ "${INSTALL_WATCHCLAW,,}" == "y" ]]; then
@@ -990,7 +975,7 @@ if [[ "${INSTALL_WATCHCLAW,,}" == "y" ]]; then
   if [ -f "${WATCHCLAW_SRC}/install.sh" ]; then
     mkdir -p /etc/watchclaw /var/lib/watchclaw /var/log/watchclaw
     cd "${WATCHCLAW_SRC}"
-    bash install.sh --standalone 2>&1 | tail -20 || true
+    bash install.sh 2>&1 | tail -20 || true
     rm -rf "${WATCHCLAW_SRC}"
     ok "WatchClaw installed (standalone)"
 
@@ -1041,14 +1026,14 @@ fi
 next_step; log "[$STEP/$TOTAL_STEPS] Starting services..."
 
 # Start gateway
-XDG_RUNTIME_DIR="${OC_RUNTIME}" systemctl --user start openclaw-gateway 2>/dev/null || true
+systemctl start openclaw-gateway 2>/dev/null || true
 sleep 5
 
 # Check health — gateway serves HTML on /, so check if port is listening
 if ss -tlnp | grep -q ":18789"; then
   ok "Gateway running on :18789"
 else
-  warn "Gateway not responding yet — may need: su - root && openclaw models auth add"
+  warn "Gateway not responding yet — run: openclaw models auth add"
 fi
 
 # Start studio
@@ -1096,8 +1081,8 @@ echo ""
 echo "  ┌─────────────────────────────────────────────────────┐"
 echo "  │  Next steps:                                        │"
 echo "  │                                                     │"
-echo "  │  1. Switch to openclaw user:                        │"
-echo "  │     su - root                                 │"
+echo "  │  1. Authenticate Claude:                            │"
+echo "  │     (you are already root)                          │"
 echo "  │                                                     │"
 echo "  │  2. Authenticate Claude:                            │"
 echo "  │     openclaw models auth add                        │"
