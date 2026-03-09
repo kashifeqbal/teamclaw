@@ -58,6 +58,10 @@ if [ -n "$CONFIG_FILE" ] && [ -f "$CONFIG_FILE" ]; then
   echo "  Org:    ${ORG_NAME:-}"
   echo ""
 
+  if [ -z "${DOTFILES_REPO:-}" ]; then
+    read -rp "  Dotfiles repo URL (blank=default): " DOTFILES_REPO
+  fi
+
   if [ -z "${OPENAI_KEY:-}" ]; then
     read -rp "  OpenAI API key (for memory/embeddings, blank to skip): " OPENAI_KEY
   fi
@@ -102,6 +106,7 @@ else
   read -rp "  Organization name (e.g. TapHealth): " ORG_NAME
   read -rp "  Product description (one line): " PRODUCT_DESC
   read -rp "  Team timezone (e.g. Asia/Kolkata): " TEAM_TZ
+  read -rp "  Dotfiles repo URL (blank=default): " DOTFILES_REPO
 
   echo ""
   echo "── GitHub Configuration ──"
@@ -140,6 +145,7 @@ INSTALL_WATCHCLAW=${INSTALL_WATCHCLAW:-n}
 WATCHCLAW_TELEGRAM_TOKEN=${WATCHCLAW_TELEGRAM_TOKEN:-}
 WATCHCLAW_CHAT_ID=${WATCHCLAW_CHAT_ID:-}
 INSTALL_HINDSIGHT=${INSTALL_HINDSIGHT:-n}
+DOTFILES_REPO=${DOTFILES_REPO:-"https://github.com/kashifeqbal/server-dotfiles.git"}
 
 # ─── Calculate total steps ───
 TOTAL_STEPS=13
@@ -255,7 +261,7 @@ next_step; log "[$STEP/$TOTAL_STEPS] Dotfiles (server-dotfiles)..."
 DOTFILES_DIR="/root/dotfiles"
 
 if [ ! -d "${DOTFILES_DIR}/.git" ]; then
-  git clone https://github.com/kashifeqbal/server-dotfiles.git "${DOTFILES_DIR}" 2>/dev/null
+  git clone "${DOTFILES_REPO}" "${DOTFILES_DIR}" 2>/dev/null
 fi
 
 if [ -d "${DOTFILES_DIR}" ]; then
@@ -975,9 +981,16 @@ if [[ "${INSTALL_WATCHCLAW,,}" == "y" ]]; then
   if [ -f "${WATCHCLAW_SRC}/install.sh" ]; then
     mkdir -p /etc/watchclaw /var/lib/watchclaw /var/log/watchclaw
     cd "${WATCHCLAW_SRC}"
-    bash install.sh 2>&1 | tail -20 || true
+    # Try non-interactive install first; fall back safely with timeout
+    if grep -q "--yes" install.sh 2>/dev/null; then
+      timeout 600 bash install.sh --yes 2>&1 | tail -20 || true
+    elif grep -q "-y" install.sh 2>/dev/null; then
+      timeout 600 bash install.sh -y 2>&1 | tail -20 || true
+    else
+      timeout 600 bash install.sh </dev/null 2>&1 | tail -20 || true
+    fi
     rm -rf "${WATCHCLAW_SRC}"
-    ok "WatchClaw installed (standalone)"
+    ok "WatchClaw installed"
 
     # Update UFW for new SSH port if WatchClaw moved it
     if grep -q "^Port 2222" /etc/ssh/sshd_config 2>/dev/null; then
