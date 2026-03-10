@@ -227,7 +227,47 @@ if ! command -v cloudflared &>/dev/null; then
     -o /tmp/cloudflared.deb
   dpkg -i /tmp/cloudflared.deb 2>/dev/null && rm -f /tmp/cloudflared.deb
 fi
-ok "cloudflared"
+ok "cloudflared binary"
+
+# ── Start Cloudflare tunnel NOW (before SSH hardening) ──────────
+# Tunnel MUST be confirmed active before we lock SSH to loopback.
+# If it fails here, we abort cleanly with SSH still open.
+TUNNEL_CONFIRMED=0
+if [ -n "${CLOUDFLARE_TUNNEL_TOKEN}" ]; then
+  log "  Starting Cloudflare tunnel (required before SSH hardening)..."
+
+  # Remove any stale service
+  systemctl stop cloudflared 2>/dev/null || true
+  cloudflared service uninstall 2>/dev/null || true
+
+  # Install and start
+  if ! cloudflared service install "${CLOUDFLARE_TUNNEL_TOKEN}" 2>&1; then
+    die "Cloudflare tunnel service install failed — check token. Aborting (SSH is still open)."
+  fi
+  systemctl enable cloudflared 2>/dev/null || true
+  systemctl start cloudflared 2>/dev/null || true
+
+  # Wait up to 30s for actual Cloudflare connection
+  for i in $(seq 1 10); do
+    sleep 3
+    if systemctl is-active cloudflared &>/dev/null; then
+      if journalctl -u cloudflared -n 30 --no-pager 2>/dev/null \
+          | grep -qE "Connection registered|Registered tunnel|conns=1|registered connections|Connected to"; then
+        TUNNEL_CONFIRMED=1
+        ok "Cloudflare tunnel active and connected ✅"
+        break
+      fi
+    fi
+    log "  Waiting for tunnel connection... (${i}/10)"
+  done
+
+  if [ "$TUNNEL_CONFIRMED" -eq 0 ]; then
+    journalctl -u cloudflared -n 30 --no-pager 2>/dev/null || true
+    die "Tunnel failed to connect after 30s. SSH is still open — fix the tunnel token and re-run."
+  fi
+else
+  warn "No CLOUDFLARE_TUNNEL_TOKEN set — SSH will remain externally accessible (no tunnel)"
+fi
 
 # oh-my-posh (prompt theme)
 if ! command -v oh-my-posh &>/dev/null; then
@@ -328,8 +368,9 @@ PasswordAuthentication no
 PermitRootLogin prohibit-password
 SSHEOF
 
-  # If cloudflared tunnel is set up, bind SSH to localhost only
-  if [ -n "${CLOUDFLARE_TUNNEL_TOKEN}" ]; then
+  # Only lock SSH to localhost AFTER tunnel is confirmed active
+  # TUNNEL_CONFIRMED is set by the cloudflared step earlier in the script
+  if [ -n "${CLOUDFLARE_TUNNEL_TOKEN}" ] && [ "${TUNNEL_CONFIRMED:-0}" -eq 1 ]; then
     if ! grep -q "^ListenAddress 127.0.0.1" /etc/ssh/sshd_config 2>/dev/null; then
       cat >> /etc/ssh/sshd_config << 'SSHLISTENEOF'
 
@@ -339,6 +380,8 @@ ListenAddress ::1
 SSHLISTENEOF
       ok "SSH bound to localhost (tunnel-only access)"
     fi
+  elif [ -n "${CLOUDFLARE_TUNNEL_TOKEN}" ] && [ "${TUNNEL_CONFIRMED:-0}" -eq 0 ]; then
+    warn "Tunnel not confirmed — SSH left open externally (safe fallback)"
   fi
   if /usr/sbin/sshd -t 2>/dev/null; then
     ok "SSH hardened (key-only, rate-limited) — restart deferred to end"
@@ -774,25 +817,14 @@ CRON_LINE="*/10 * * * * ${OC_WORKSPACE}/scripts/healthcheck.sh >> /var/log/teamc
 ok "Healthcheck cron (every 10 min)"
 
 # ═══════════════════════════════════════════════════════════════
-# PHASE 11: Cloudflare Tunnel (optional — MUST come before WatchClaw)
-# ═══════════════════════════════════════════════════════════════
-
+# PHASE 11: Cloudflare Tunnel — already set up in Phase 2 (before SSH hardening)
+# TUNNEL_CONFIRMED is already set. Just log status here.
 if [ -n "${CLOUDFLARE_TUNNEL_TOKEN}" ]; then
-  next_step; log "[$STEP/$TOTAL_STEPS] Cloudflare tunnel..."
-
-  # Install tunnel service
-  cloudflared service install "${CLOUDFLARE_TUNNEL_TOKEN}" 2>/dev/null || true
-
-  # Start it
-  systemctl enable cloudflared 2>/dev/null || true
-  systemctl start cloudflared 2>/dev/null || true
-
-  # Verify
-  sleep 3
-  if systemctl is-active cloudflared &>/dev/null; then
-    ok "Cloudflare tunnel active"
+  next_step; log "[$STEP/$TOTAL_STEPS] Cloudflare tunnel (already active from Phase 2)..."
+  if [ "${TUNNEL_CONFIRMED:-0}" -eq 1 ]; then
+    ok "Cloudflare tunnel confirmed active ✅"
   else
-    warn "Tunnel service not active — check: journalctl -u cloudflared"
+    warn "Tunnel not confirmed — SSH remains open externally"
   fi
 fi
 
@@ -992,10 +1024,15 @@ if [[ "${INSTALL_WATCHCLAW,,}" == "y" ]]; then
     # Update UFW for new SSH port if WatchClaw moved it
     if grep -q "^Port 2222" /etc/ssh/sshd_config 2>/dev/null; then
       if [ -n "${CLOUDFLARE_TUNNEL_TOKEN}" ]; then
-        # Tunnel mode: only allow loopback on new port
-        ufw allow from 127.0.0.1 to any port 2222 proto tcp comment 'SSH 2222 loopback (tunnel)' 2>/dev/null
-        ufw allow from ::1 to any port 2222 proto tcp comment 'SSH 2222 loopback v6 (tunnel)' 2>/dev/null
-        ok "UFW: SSH 2222 loopback-only (tunnel mode)"
+        # Only lock to loopback if tunnel is confirmed active
+        if [ "${TUNNEL_CONFIRMED:-0}" -eq 1 ]; then
+          ufw allow from 127.0.0.1 to any port 2222 proto tcp comment 'SSH 2222 loopback (tunnel)' 2>/dev/null
+          ufw allow from ::1 to any port 2222 proto tcp comment 'SSH 2222 loopback v6 (tunnel)' 2>/dev/null
+          ok "UFW: SSH 2222 loopback-only (tunnel mode)"
+        else
+          ufw allow 2222/tcp comment "SSH 2222 (tunnel not confirmed — open fallback)" 2>/dev/null || true
+          ok "UFW: SSH 2222 open (tunnel not confirmed, kept externally accessible)"
+        fi
       else
         ufw allow 2222/tcp comment "SSH (moved by WatchClaw)" 2>/dev/null || true
         ok "UFW: SSH 2222 open"
