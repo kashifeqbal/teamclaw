@@ -23,6 +23,7 @@ ok()   { echo -e "  \033[1;32m✅ $*\033[0m"; }
 warn() { echo -e "  \033[1;33m⚠️  $*\033[0m"; }
 skip() { echo -e "  \033[0;90m⏭  $*\033[0m"; }
 fail() { echo -e "  \033[1;31m❌ $*\033[0m"; }
+die()  { echo -e "\n\033[1;31m💀 FATAL: $*\033[0m\n"; exit 1; }
 
 echo ""
 echo "🦞 TeamClaw Setup v0.2"
@@ -136,7 +137,7 @@ AGENT_ID=$(echo "${AGENT_NAME}" | tr '[:upper:]' '[:lower:]' | tr ' ' '-')
 GH_PROFILE=${GH_PROFILE:-${GH_ORG:-}}
 GH_TOKEN=${GH_TOKEN:-}
 OPT_DOCKER=${OPT_DOCKER:-n}
-OPENAI_KEY=${OPENAI_KEY:-}
+# OPENAI_KEY intentionally not used — Hindsight handles memory locally
 BRAVE_KEY=${BRAVE_KEY:-}
 CLOUDFLARE_TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN:-}
 INSTALL_WATCHCLAW=${INSTALL_WATCHCLAW:-n}
@@ -437,15 +438,15 @@ fi
 ufw --force reset 2>/dev/null
 ufw default deny incoming 2>/dev/null
 ufw default allow outgoing 2>/dev/null
-if [ -n "${CLOUDFLARE_TUNNEL_TOKEN}" ]; then
-  # Tunnel handles SSH — only allow loopback
+if [ -n "${CLOUDFLARE_TUNNEL_TOKEN}" ] && [ "${TUNNEL_CONFIRMED:-0}" -eq 1 ]; then
+  # Tunnel confirmed active — lock SSH to loopback only
   ufw allow from 127.0.0.1 to any port 22 proto tcp comment 'SSH loopback (tunnel)' 2>/dev/null
   ufw allow from ::1 to any port 22 proto tcp comment 'SSH loopback v6 (tunnel)' 2>/dev/null
-  ok "UFW: SSH loopback-only (tunnel mode)"
+  ok "UFW: SSH loopback-only (tunnel confirmed)"
 else
-  # No tunnel — allow SSH externally
+  # No confirmed tunnel — keep SSH open externally (safe fallback)
   ufw allow ssh comment 'SSH' 2>/dev/null
-  ok "UFW: SSH open (no tunnel)"
+  ok "UFW: SSH open (no tunnel or tunnel unconfirmed)"
 fi
 ufw --force enable 2>/dev/null
 ok "UFW active"
@@ -460,7 +461,7 @@ backend  = systemd
 
 [sshd]
 enabled  = true
-port     = ssh
+port     = 22,2222
 maxretry = 3
 findtime = 600
 F2BEOF
@@ -964,7 +965,7 @@ DEFAULT_USER_ID=${AGENT_ID}
 DEFAULT_NAMESPACE=teamclaw-${ORG_NAME,,}
 PAGEINDEX_HOME=./vendor/PageIndex
 PAGEINDEX_PYTHON=.venv/bin/python3
-PAGEINDEX_MODEL=gpt-4o-2024-11-20
+# PAGEINDEX_MODEL intentionally omitted — Hindsight uses local lexical retrieval, no OpenAI needed
 HENV
 
   # systemd service
