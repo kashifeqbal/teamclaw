@@ -62,9 +62,7 @@ if [ -n "$CONFIG_FILE" ] && [ -f "$CONFIG_FILE" ]; then
     read -rp "  Dotfiles repo URL (blank=default): " DOTFILES_REPO
   fi
 
-  if [ -z "${OPENAI_KEY:-}" ]; then
-    read -rp "  OpenAI API key (for memory/embeddings, blank to skip): " OPENAI_KEY
-  fi
+  # OPENAI_KEY removed — memory handled by Hindsight (local, no API cost)
   if [ -z "${BRAVE_KEY:-}" ]; then
     read -rp "  Brave Search API key (blank to skip): " BRAVE_KEY
   fi
@@ -119,7 +117,7 @@ else
   echo ""
   echo "── Optional Features ──"
   read -rp "  Install Docker? [y/N]: " OPT_DOCKER
-  read -rp "  OpenAI API key (for memory search, blank to skip): " OPENAI_KEY
+  # OpenAI key removed — memory handled by Hindsight (local, zero cost)
   read -rp "  Brave Search API key (blank to skip): " BRAVE_KEY
 
   echo ""
@@ -585,7 +583,7 @@ GATEWAY_TOKEN=$(openssl rand -hex 24)
 # .env
 ENV_FILE="${OC_STATE}/.env"
 : > "$ENV_FILE"
-[ -n "${OPENAI_KEY:-}" ] && echo "OPENAI_API_KEY=${OPENAI_KEY}" >> "$ENV_FILE"
+# OPENAI_API_KEY intentionally omitted — memory uses Hindsight (local, free)
 [ -n "${BRAVE_KEY:-}" ] && echo "BRAVE_SEARCH_KEY=${BRAVE_KEY}" >> "$ENV_FILE"
 chmod 600 "$ENV_FILE"
 
@@ -603,10 +601,10 @@ cat > "${OC_STATE}/openclaw.json" << OCJSON
     "defaults": {
       "model": {
         "primary": "anthropic/claude-sonnet-4-6",
-        "fallbacks": ["anthropic/claude-sonnet-4-6"]
+        "fallbacks": ["openai-codex/gpt-5.3-codex"]
       },
       "memorySearch": {
-        "enabled": true,
+        "enabled": false,
         "sources": ["memory", "sessions"],
         "experimental": { "sessionMemory": true },
         "query": {
@@ -619,7 +617,7 @@ cat > "${OC_STATE}/openclaw.json" << OCJSON
             "temporalDecay": { "enabled": true, "halfLifeDays": 14 }
           }
         },
-        "sync": { "onSessionStart": true, "onSearch": true, "watch": true }
+        "sync": { "onSessionStart": false, "onSearch": false, "watch": false }
       }
     },
     "list": [
@@ -934,7 +932,6 @@ DEFAULT_USER_ID=${AGENT_ID}
 DEFAULT_NAMESPACE=teamclaw-${ORG_NAME,,}
 PAGEINDEX_HOME=./vendor/PageIndex
 PAGEINDEX_PYTHON=.venv/bin/python3
-OPENAI_API_KEY=${OPENAI_KEY}
 PAGEINDEX_MODEL=gpt-4o-2024-11-20
 HENV
 
