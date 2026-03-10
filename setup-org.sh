@@ -143,6 +143,8 @@ CLOUDFLARE_TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN:-}
 INSTALL_WATCHCLAW=${INSTALL_WATCHCLAW:-n}
 WATCHCLAW_TELEGRAM_TOKEN=${WATCHCLAW_TELEGRAM_TOKEN:-}
 WATCHCLAW_CHAT_ID=${WATCHCLAW_CHAT_ID:-}
+AGENT_TELEGRAM_TOKEN=${AGENT_TELEGRAM_TOKEN:-}
+AGENT_TELEGRAM_CHAT_ID=${AGENT_TELEGRAM_CHAT_ID:-}
 INSTALL_HINDSIGHT=${INSTALL_HINDSIGHT:-n}
 DOTFILES_REPO=${DOTFILES_REPO:-"https://github.com/kashifeqbal/server-dotfiles.git"}
 
@@ -673,7 +675,20 @@ cat > "${OC_STATE}/openclaw.json" << OCJSON
         "tools": { "fs": { "workspaceOnly": false } }
       }
     ]
+  }$(if [ -n "${AGENT_TELEGRAM_TOKEN:-}" ]; then
+cat << TGJSON
+,
+  "accounts": {
+    "telegram": [
+      {
+        "token": "${AGENT_TELEGRAM_TOKEN}",
+        "agents": ["${AGENT_ID}"],
+        "allowedChats": [${AGENT_TELEGRAM_CHAT_ID:-}]
+      }
+    ]
   }
+TGJSON
+fi)
 }
 OCJSON
 chmod 700 "${OC_STATE}" "${OC_STATE}/credentials" 2>/dev/null || true
@@ -1147,8 +1162,12 @@ echo "  │       gh auth login                                 │"
 echo "  │                                                     │"
 fi
 echo "  │  Wire channels:                                     │"
+if [ -n "${AGENT_TELEGRAM_TOKEN:-}" ]; then
+echo "  │  • Telegram: ✅ auto-configured in openclaw.json    │"
+else
 echo "  │  • Telegram: @BotFather → /newbot                   │"
 echo "  │    openclaw channels login telegram                 │"
+fi
 echo "  │  • Discord: discord.com/developers → New App        │"
 echo "  │    openclaw channels login discord                  │"
 echo "  │                                                     │"
