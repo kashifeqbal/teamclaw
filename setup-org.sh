@@ -44,7 +44,8 @@ fail() { echo -e "  \033[1;31m❌ $*\033[0m"; }
 tty_read() {
   local prompt="$1" varname="$2"
   if [ -t 0 ]; then
-    read -rp "$prompt" "$varname"
+    # shellcheck disable=SC2229  # intentional indirect ref: $varname expands to target var name
+    read -rp "$prompt" $varname
   fi
 }
 
@@ -210,8 +211,6 @@ TOTAL_STEPS=13
 [[ "${INSTALL_DOCS_SYNC,,}" == "y" ]] && TOTAL_STEPS=$((TOTAL_STEPS + 1))
 STEP=0
 next_step() { STEP=$((STEP + 1)); }
-
-OC_HOME="/root"
 
 echo ""
 echo "  Agent:    ${AGENT_NAME} ${AGENT_EMOJI:-}"
@@ -407,7 +406,7 @@ if [ -n "${DOTFILES_REPO:-}" ]; then
 
   if [ -d "${DOTFILES_DIR}" ]; then
     rm -f "/root/.zshrc" "/root/.zshenv" "/root/.gitconfig" "/root/.vimrc" 2>/dev/null
-    cd "${DOTFILES_DIR}"
+    cd "${DOTFILES_DIR}" || exit
     echo '\.git' > "${DOTFILES_DIR}/.stow-local-ignore" 2>/dev/null || true
     stow --target="/root" --restow --ignore='\.git' . 2>/dev/null || {
       for f in .zshrc .zimrc .zshenv .exports .aliases .gitconfig .vimrc .curlrc .wgetrc .stow-global-ignore; do
@@ -883,7 +882,7 @@ fi
 next_step; log "[$STEP/$TOTAL_STEPS] Installing OpenClaw Studio..."
 if [ ! -d /opt/openclaw-studio ]; then
   git clone --depth 1 https://github.com/grp06/openclaw-studio.git /opt/openclaw-studio 2>/dev/null
-  cd /opt/openclaw-studio
+  cd /opt/openclaw-studio || exit
 
   if grep -q "useSearchParams" src/app/page.tsx 2>/dev/null; then
     python3 << 'PATCHEOF'
@@ -1020,7 +1019,7 @@ if [[ "${INSTALL_WATCHCLAW,,}" == "y" ]]; then
 
   if [ -f "${WATCHCLAW_SRC}/install.sh" ]; then
     mkdir -p /etc/watchclaw /var/lib/watchclaw /var/log/watchclaw
-    cd "${WATCHCLAW_SRC}"
+    cd "${WATCHCLAW_SRC}" || exit
     timeout 120 bash install.sh --standalone </dev/null 2>&1 | tail -10 || true
     rm -rf "${WATCHCLAW_SRC}"
     ok "WatchClaw installed"

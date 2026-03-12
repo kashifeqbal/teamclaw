@@ -1,0 +1,103 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    name: Lint & Validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: sudo apt-get install -y shellcheck
+
+      - name: shellcheck setup-org.sh
+        run: shellcheck -S warning setup-org.sh
+
+      - name: Bash syntax check
+        run: bash -n setup-org.sh
+
+      - name: Verify team.env.example is valid shell
+        run: bash -n team.env.example
+
+      - name: Check team.env.example has required fields
+        run: |
+          required_fields=(
+            AGENT_NAME
+            AGENT_EMOJI
+            ORG_NAME
+            PRODUCT_DESC
+            TEAM_TZ
+            PULSE_TELEGRAM_BOT_TOKEN
+            PULSE_ALLOW_FROM
+            OPS_TELEGRAM_BOT_TOKEN
+            OPS_TELEGRAM_CHAT_ID
+            OPS_ALLOW_FROM
+            CLOUDFLARE_TUNNEL_TOKEN
+            INSTALL_WATCHCLAW
+            INSTALL_HINDSIGHT
+            DOCS_SYNC_REPO
+          )
+          missing=()
+          for field in "${required_fields[@]}"; do
+            grep -q "^${field}=" team.env.example || missing+=("$field")
+          done
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "❌ Missing fields in team.env.example: ${missing[*]}"
+            exit 1
+          fi
+          echo "✅ All required fields present in team.env.example"
+
+      - name: Check no hardcoded personal defaults in script
+        run: |
+          # Dotfiles should not default to kashifeqbal personal repo
+          if grep -n 'kashifeqbal/server-dotfiles\|kashifeqbal/dotfiles' setup-org.sh; then
+            echo "❌ Hardcoded personal dotfiles repo found in setup-org.sh"
+            exit 1
+          fi
+          echo "✅ No hardcoded personal defaults"
+
+      - name: Check Fix 2 - EnvironmentFile in gateway service
+        run: |
+          grep -q "EnvironmentFile" setup-org.sh || {
+            echo "❌ Gateway systemd unit missing EnvironmentFile directive"
+            exit 1
+          }
+          echo "✅ EnvironmentFile present in gateway service"
+
+      - name: Check Fix 4 - memory-core plugin configured
+        run: |
+          grep -q "memory-core" setup-org.sh || {
+            echo "❌ memory-core plugin not configured in openclaw.json generation"
+            exit 1
+          }
+          echo "✅ memory-core plugin present"
+
+      - name: Check Fix 11 - unattended-upgrades installed
+        run: |
+          grep -q "unattended-upgrades" setup-org.sh || {
+            echo "❌ unattended-upgrades not installed"
+            exit 1
+          }
+          echo "✅ unattended-upgrades present"
+
+      - name: Check Fix 12 - inotify watches configured
+        run: |
+          grep -q "inotify.max_user_watches" setup-org.sh || {
+            echo "❌ inotify watches not configured in sysctl"
+            exit 1
+          }
+          echo "✅ inotify watches present"
+
+      - name: Check Fix 15 - CF tunnel lockout guard
+        run: |
+          grep -q "HALTING before SSH lockdown" setup-org.sh || {
+            echo "❌ CF tunnel lockout guard missing"
+            exit 1
+          }
+          echo "✅ CF tunnel lockout guard present"
