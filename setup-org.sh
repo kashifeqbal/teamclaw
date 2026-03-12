@@ -96,6 +96,15 @@ if [ -n "$CONFIG_FILE" ] && [ -f "$CONFIG_FILE" ]; then
     warn "OPS_TELEGRAM_BOT_TOKEN not set — no ops alerts channel"
   fi
   echo ""
+  echo "── Discord ────────────────────────────────"
+  if [ -n "${DISCORD_BOT_TOKEN:-}" ]; then
+    echo "  Discord bot:  ✅ (from config)"
+    echo "  Guild ID:     ${DISCORD_GUILD_ID:-"(not set)"}"
+    echo "  Channels:     ${DISCORD_CHANNEL_IDS:-"(all blocked)"}"
+  else
+    warn "DISCORD_BOT_TOKEN not set — no Discord integration"
+  fi
+  echo ""
   echo "── Infrastructure ─────────────────────────"
   if [ -n "${CLOUDFLARE_TUNNEL_TOKEN:-}" ]; then
     echo "  CF Tunnel:   ✅ (from config)"
@@ -155,6 +164,15 @@ else
   tty_read "  Ops bot allowFrom user IDs (comma-separated): " OPS_ALLOW_FROM
 
   echo ""
+  echo "── Discord ──"
+  echo "  (For dev team channel access — separate agent, allowlisted channels)"
+  tty_read "  Discord bot token (blank to skip): " DISCORD_BOT_TOKEN
+  if [ -n "${DISCORD_BOT_TOKEN:-}" ]; then
+    tty_read "  Discord guild (server) ID: " DISCORD_GUILD_ID
+    tty_read "  Allowed channel IDs (comma-separated): " DISCORD_CHANNEL_IDS
+  fi
+
+  echo ""
   echo "── Optional Features ──"
   tty_read "  Install Docker? [y/N]: " OPT_DOCKER
   tty_read "  OpenAI API key (for memory/embeddings, blank to skip): " OPENAI_KEY
@@ -199,6 +217,11 @@ OPS_ALLOW_FROM=${OPS_ALLOW_FROM:-}
 # WatchClaw — fall back to ops bot if not explicitly set
 WATCHCLAW_TELEGRAM_TOKEN=${WATCHCLAW_TELEGRAM_TOKEN:-${OPS_TELEGRAM_BOT_TOKEN:-}}
 WATCHCLAW_CHAT_ID=${WATCHCLAW_CHAT_ID:-${OPS_TELEGRAM_CHAT_ID:-}}
+
+# Discord defaults
+DISCORD_BOT_TOKEN=${DISCORD_BOT_TOKEN:-}
+DISCORD_GUILD_ID=${DISCORD_GUILD_ID:-}
+DISCORD_CHANNEL_IDS=${DISCORD_CHANNEL_IDS:-}  # comma-separated, empty = block all
 
 # Docs sync — enable if repo is set (Fix #10: use org-agnostic var)
 [ -n "${DOCS_SYNC_REPO}" ] && INSTALL_DOCS_SYNC="y"
@@ -860,6 +883,59 @@ if pulse_token or ops_token:
     if bindings:
         cfg["bindings"] = bindings
 
+# Discord channel config
+discord_token   = "${DISCORD_BOT_TOKEN}"
+discord_guild   = "${DISCORD_GUILD_ID}"
+discord_channels_raw = "${DISCORD_CHANNEL_IDS}"
+discord_channels = [c.strip() for c in discord_channels_raw.split(",") if c.strip()]
+
+if discord_token and discord_guild:
+    discord_agent_id = f"{agent_id}-discord"
+
+    # Create a dedicated Discord agent
+    cfg["agents"]["list"].append({
+        "id": discord_agent_id,
+        "name": f"{agent_name} Discord",
+        "workspace": oc_workspace,
+        "model": {"primary": "anthropic/claude-sonnet-4-6"},
+        "identity": {"emoji": "💬"},
+        "tools": {"fs": {"workspaceOnly": False}}
+    })
+
+    # Build per-channel config — allow listed channels, block everything else
+    channel_cfg = {"*": {"allow": False}}
+    for ch_id in discord_channels:
+        channel_cfg[ch_id] = {"allow": True, "requireMention": False}
+
+    cfg["channels"]["discord"] = {
+        "enabled": True,
+        "groupPolicy": "allowlist",
+        "streaming": "off",
+        "guilds": {
+            discord_guild: {
+                "requireMention": False,
+                "channels": channel_cfg
+            }
+        },
+        "accounts": {
+            "default": {
+                "token": discord_token,
+                "groupPolicy": "allowlist",
+                "streaming": "off"
+            }
+        }
+    }
+    cfg["plugins"]["entries"]["discord"] = {"enabled": True}
+
+    # Binding: route discord agent to discord channel
+    if "bindings" not in cfg:
+        cfg["bindings"] = []
+    cfg["bindings"].append({
+        "type": "route",
+        "agentId": discord_agent_id,
+        "match": {"channel": "discord"}
+    })
+
 out = "/root/.openclaw/openclaw.json"
 with open(out, "w") as f:
     json.dump(cfg, f, indent=2)
@@ -1345,6 +1421,7 @@ $CF_TUNNEL_ACTIVE && echo "  Tunnel:    cloudflared ✅ (verified)"
 [[ "${INSTALL_HINDSIGHT,,}" == "y" ]] && echo "  Hindsight: http://localhost:8787 ✅"
 [[ "${INSTALL_DOCS_SYNC,,}" == "y" ]] && echo "  Docs sync: /opt/teamclaw/scripts/sync-docs.sh (every 15 min) ✅"
 [ -n "${PULSE_TELEGRAM_BOT_TOKEN:-}" ] && echo "  Telegram:  ${AGENT_NAME} bot + Ops bot wired ✅"
+[ -n "${DISCORD_BOT_TOKEN:-}" ]        && echo "  Discord:   ${AGENT_NAME}-discord agent wired (guild: ${DISCORD_GUILD_ID}) ✅"
 [ -n "${OPENAI_KEY:-}" ]               && echo "  Memory:    memory-core + OpenAI embeddings ✅"
 echo ""
 echo "  ┌─────────────────────────────────────────────────────┐"

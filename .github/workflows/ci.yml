@@ -38,6 +38,9 @@ jobs:
             OPS_TELEGRAM_BOT_TOKEN
             OPS_TELEGRAM_CHAT_ID
             OPS_ALLOW_FROM
+            DISCORD_BOT_TOKEN
+            DISCORD_GUILD_ID
+            DISCORD_CHANNEL_IDS
             CLOUDFLARE_TUNNEL_TOKEN
             INSTALL_WATCHCLAW
             INSTALL_HINDSIGHT
