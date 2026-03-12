@@ -96,6 +96,24 @@ if [ -n "$CONFIG_FILE" ] && [ -f "$CONFIG_FILE" ]; then
     warn "OPS_TELEGRAM_BOT_TOKEN not set — no ops alerts channel"
   fi
   echo ""
+  echo "── Team Members ───────────────────────────"
+  _any_member=false
+  for i in 1 2 3 4 5; do
+    # shellcheck disable=SC2154  # dynamic vars via eval
+    eval "_name=\${TEAM_MEMBER_${i}_NAME:-}"
+    eval "_id=\${TEAM_MEMBER_${i}_TELEGRAM_ID:-}"
+    eval "_tok=\${TEAM_MEMBER_${i}_BOT_TOKEN:-}"
+    [ -z "$_name" ] && continue
+    _any_member=true
+    if [ -n "$_tok" ]; then
+      # shellcheck disable=SC2154
+      echo "  Member $i: ${_name} (id: ${_id}) → personal bot ✅"
+    else
+      warn "Member $i: ${_name} — no bot token, will be skipped"
+    fi
+  done
+  $_any_member || warn "No team members configured — only shared Pulse bot will be set up"
+  echo ""
   echo "── Discord ────────────────────────────────"
   if [ -n "${DISCORD_BOT_TOKEN:-}" ]; then
     echo "  Discord bot:  ✅ (from config)"
@@ -173,6 +191,18 @@ else
   fi
 
   echo ""
+  echo "── Per-user personal bots (optional) ──"
+  echo "  Each team member gets their own bot → dedicated agent → isolated workspace"
+  echo "  Add up to 5. Leave name blank to stop."
+  for i in 1 2 3 4 5; do
+    tty_read "  Member $i name (blank to stop): " "TEAM_MEMBER_${i}_NAME"
+    eval "_name=\${TEAM_MEMBER_${i}_NAME:-}"
+    [ -z "$_name" ] && break
+    tty_read "  Member $i Telegram user ID: " "TEAM_MEMBER_${i}_TELEGRAM_ID"
+    tty_read "  Member $i bot token (@BotFather): " "TEAM_MEMBER_${i}_BOT_TOKEN"
+  done
+
+  echo ""
   echo "── Optional Features ──"
   tty_read "  Install Docker? [y/N]: " OPT_DOCKER
   tty_read "  OpenAI API key (for memory/embeddings, blank to skip): " OPENAI_KEY
@@ -222,6 +252,14 @@ WATCHCLAW_CHAT_ID=${WATCHCLAW_CHAT_ID:-${OPS_TELEGRAM_CHAT_ID:-}}
 DISCORD_BOT_TOKEN=${DISCORD_BOT_TOKEN:-}
 DISCORD_GUILD_ID=${DISCORD_GUILD_ID:-}
 DISCORD_CHANNEL_IDS=${DISCORD_CHANNEL_IDS:-}  # comma-separated, empty = block all
+
+# Team member defaults (export for Python config generator)
+for i in 1 2 3 4 5; do
+  eval "TEAM_MEMBER_${i}_NAME=\${TEAM_MEMBER_${i}_NAME:-}"
+  eval "TEAM_MEMBER_${i}_TELEGRAM_ID=\${TEAM_MEMBER_${i}_TELEGRAM_ID:-}"
+  eval "TEAM_MEMBER_${i}_BOT_TOKEN=\${TEAM_MEMBER_${i}_BOT_TOKEN:-}"
+  eval "export TEAM_MEMBER_${i}_NAME TEAM_MEMBER_${i}_TELEGRAM_ID TEAM_MEMBER_${i}_BOT_TOKEN"
+done
 
 # Docs sync — enable if repo is set (Fix #10: use org-agnostic var)
 [ -n "${DOCS_SYNC_REPO}" ] && INSTALL_DOCS_SYNC="y"
@@ -721,6 +759,37 @@ HB
 
 ok "${AGENT_NAME} workspace created"
 
+# Per-member workspaces
+for i in 1 2 3 4 5; do
+  eval "_name=\${TEAM_MEMBER_${i}_NAME:-}"
+  [ -z "$_name" ] && continue
+  _member_id=$(echo "$_name" | tr '[:upper:]' '[:lower:]' | tr ' ' '-')
+  _member_ws="${OC_WORKSPACE%workspace}workspace-${_member_id}"
+  mkdir -p "${_member_ws}/memory"
+  cat > "${_member_ws}/SOUL.md" << MSOUL
+# SOUL.md — ${_name}'s Assistant
+
+You are ${_name}'s personal AI assistant at ${ORG_NAME}.
+Direct, concise, helpful. You know ${_name}'s context and preferences.
+MSOUL
+  cat > "${_member_ws}/AGENTS.md" << 'MAGENTS'
+# AGENTS.md
+1. Read SOUL.md
+2. Read USER.md
+3. Read memory/ for recent context
+MAGENTS
+  cat > "${_member_ws}/USER.md" << MUSER
+# USER.md
+- Name: ${_name}
+- Org: ${ORG_NAME}
+- Timezone: ${TEAM_TZ:-Asia/Kolkata}
+MUSER
+  for f in TOOLS.md IDENTITY.md HEARTBEAT.md; do
+    touch "${_member_ws}/${f}"
+  done
+  ok "Workspace: ${_member_ws}"
+done
+
 # ═══════════════════════════════════════════════════════════════
 # PHASE 9: openclaw.json — full multi-agent / multi-bot config
 # Fix #2: Gateway systemd unit loads .env via EnvironmentFile
@@ -882,6 +951,59 @@ if pulse_token or ops_token:
         })
     if bindings:
         cfg["bindings"] = bindings
+
+# Per-user personal assistant bots
+import os
+
+# Ensure channels.telegram exists before adding member bots
+if "channels" not in cfg:
+    cfg["channels"] = {}
+if "telegram" not in cfg["channels"]:
+    cfg["channels"]["telegram"] = {
+        "enabled": True, "dmPolicy": "pairing", "groupPolicy": "open",
+        "streaming": "partial", "accounts": {}, "defaultAccount": "default"
+    }
+    cfg["plugins"]["entries"]["telegram"] = {"enabled": True}
+
+team_members = []
+for i in range(1, 6):
+    name  = os.environ.get(f"TEAM_MEMBER_{i}_NAME",        "").strip()
+    tid   = os.environ.get(f"TEAM_MEMBER_{i}_TELEGRAM_ID", "").strip()
+    token = os.environ.get(f"TEAM_MEMBER_{i}_BOT_TOKEN",   "").strip()
+    if name and tid and token:
+        member_id = name.lower().replace(" ", "-")
+        ws = oc_workspace.replace("/workspace", f"/workspace-{member_id}")
+        team_members.append({"name": name, "id": member_id, "tid": int(tid), "token": token, "ws": ws})
+
+for m in team_members:
+    # Agent
+    cfg["agents"]["list"].append({
+        "id": f"assistant-{m['id']}",
+        "name": f"{m['name']}'s Assistant",
+        "workspace": m["ws"],
+        "model": {"primary": "anthropic/claude-sonnet-4-6"},
+        "tools": {"fs": {"workspaceOnly": False}}
+    })
+    # Bot account (DM only, allowlist = just this user)
+    cfg["channels"]["telegram"]["accounts"][m["id"]] = {
+        "botToken": m["token"],
+        "dmPolicy": "allowlist",
+        "allowFrom": [m["tid"]],
+        "groupPolicy": "allowlist",
+        "streaming": "partial"
+    }
+    # Binding: that user's DM → their personal assistant
+    if "bindings" not in cfg:
+        cfg["bindings"] = []
+    cfg["bindings"].append({
+        "type": "route",
+        "agentId": f"assistant-{m['id']}",
+        "match": {
+            "channel": "telegram",
+            "accountId": m["id"],
+            "peer": {"kind": "direct", "id": str(m["tid"])}
+        }
+    })
 
 # Discord channel config
 discord_token   = "${DISCORD_BOT_TOKEN}"
@@ -1422,6 +1544,10 @@ $CF_TUNNEL_ACTIVE && echo "  Tunnel:    cloudflared ✅ (verified)"
 [[ "${INSTALL_DOCS_SYNC,,}" == "y" ]] && echo "  Docs sync: /opt/teamclaw/scripts/sync-docs.sh (every 15 min) ✅"
 [ -n "${PULSE_TELEGRAM_BOT_TOKEN:-}" ] && echo "  Telegram:  ${AGENT_NAME} bot + Ops bot wired ✅"
 [ -n "${DISCORD_BOT_TOKEN:-}" ]        && echo "  Discord:   ${AGENT_NAME}-discord agent wired (guild: ${DISCORD_GUILD_ID}) ✅"
+for i in 1 2 3 4 5; do
+  eval "_mn=\${TEAM_MEMBER_${i}_NAME:-}"
+  [ -n "$_mn" ] && echo "  Personal:  assistant-$(echo "$_mn" | tr '[:upper:]' '[:lower:]' | tr ' ' '-') → ${_mn}'s bot ✅"
+done
 [ -n "${OPENAI_KEY:-}" ]               && echo "  Memory:    memory-core + OpenAI embeddings ✅"
 echo ""
 echo "  ┌─────────────────────────────────────────────────────┐"

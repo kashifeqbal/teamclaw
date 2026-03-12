@@ -38,6 +38,7 @@ jobs:
             OPS_TELEGRAM_BOT_TOKEN
             OPS_TELEGRAM_CHAT_ID
             OPS_ALLOW_FROM
+            TEAM_MEMBER_1_NAME
             DISCORD_BOT_TOKEN
             DISCORD_GUILD_ID
             DISCORD_CHANNEL_IDS
