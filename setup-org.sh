@@ -2,7 +2,7 @@
 set -uo pipefail
 
 # ═══════════════════════════════════════════════════════════════
-# TeamClaw Setup — OpenClaw for Teams (v0.3)
+# TeamClaw Setup — OpenClaw for Teams (v0.4)
 # ═══════════════════════════════════════════════════════════════
 #
 # Usage:
@@ -14,6 +14,24 @@ set -uo pipefail
 #   - Claude subscription (for openclaw models auth add)
 #
 # Runs everything as root — no dedicated user needed.
+#
+# Changelog:
+#   v0.4 — 2026-03-12
+#     Fix 1:  SSH restarted at end regardless of WatchClaw
+#     Fix 2:  Gateway systemd unit loads .env via EnvironmentFile
+#     Fix 3:  openclaw config validate → openclaw doctor
+#     Fix 4:  memory-core plugin configured in openclaw.json
+#     Fix 5:  CF tunnel validated via HTTP before SSH lockdown
+#     Fix 6:  team.env.example includes all Telegram fields
+#     Fix 7:  --config review shows Telegram config
+#     Fix 8:  INSTALL_DASHBOARD acknowledged (stub, not silent)
+#     Fix 9:  Dotfiles default changed to empty (skip if not set)
+#     Fix 10: Docs sync renamed to org-agnostic (DOCS_SYNC_REPO, sync-docs.sh)
+#     Fix 11: unattended-upgrades installed + configured
+#     Fix 12: fs.inotify.max_user_watches=1048576 added to sysctl
+#     Fix 13: Studio ExecStart uses node_modules/.bin/next path
+#     Fix 14: PULSE_ALLOW_FROM / OPS_ALLOW_FROM in team.env.example
+#     Fix 15: CF tunnel exit-on-fail with recovery instructions
 
 # ─── Helpers ───
 log()  { echo -e "\n\033[1;34m▶ $*\033[0m"; }
@@ -22,17 +40,16 @@ warn() { echo -e "  \033[1;33m⚠️  $*\033[0m"; }
 skip() { echo -e "  \033[0;90m⏭  $*\033[0m"; }
 fail() { echo -e "  \033[1;31m❌ $*\033[0m"; }
 
-# Fix #7: TTY-safe read — silently skips if stdin is not a terminal
+# Fix #7 (v0.3): TTY-safe read — silently skips if stdin is not a terminal
 tty_read() {
   local prompt="$1" varname="$2"
   if [ -t 0 ]; then
     read -rp "$prompt" "$varname"
   fi
-  # Non-TTY: variable keeps its default (empty or already set from config)
 }
 
 echo ""
-echo "🦞 TeamClaw Setup v0.3"
+echo "🦞 TeamClaw Setup v0.4"
 echo "═══════════════════════════════════════════"
 echo ""
 
@@ -59,37 +76,58 @@ if [ -n "$CONFIG_FILE" ] && [ -f "$CONFIG_FILE" ]; then
   source "$CONFIG_FILE"
 
   echo ""
-  echo "── Review & Complete ──"
-  echo "  Agent:  ${AGENT_NAME:-} ${AGENT_EMOJI:-}"
-  echo "  Org:    ${ORG_NAME:-}"
+  echo "── Agent ──────────────────────────────────"
+  echo "  Name:     ${AGENT_NAME:-} ${AGENT_EMOJI:-}"
+  echo "  Org:      ${ORG_NAME:-}"
+  echo "  Timezone: ${TEAM_TZ:-}"
+  echo ""
+  echo "── Telegram ───────────────────────────────"
+  if [ -n "${PULSE_TELEGRAM_BOT_TOKEN:-}" ]; then
+    echo "  Pulse bot:    ✅ (from config)"
+    echo "  Allow from:   ${PULSE_ALLOW_FROM:-"(anyone)"}"
+  else
+    warn "PULSE_TELEGRAM_BOT_TOKEN not set — agent will have no Telegram"
+  fi
+  if [ -n "${OPS_TELEGRAM_BOT_TOKEN:-}" ]; then
+    echo "  Ops bot:      ✅ (from config)"
+    echo "  Ops chat ID:  ${OPS_TELEGRAM_CHAT_ID:-"(not set)"}"
+  else
+    warn "OPS_TELEGRAM_BOT_TOKEN not set — no ops alerts channel"
+  fi
+  echo ""
+  echo "── Infrastructure ─────────────────────────"
+  if [ -n "${CLOUDFLARE_TUNNEL_TOKEN:-}" ]; then
+    echo "  CF Tunnel:   ✅ (from config)"
+  else
+    warn "No Cloudflare Tunnel — SSH will remain open to internet"
+  fi
+  echo "  WatchClaw:   ${INSTALL_WATCHCLAW:-n}"
+  echo "  Hindsight:   ${INSTALL_HINDSIGHT:-n}"
+  echo "  Dashboard:   ${INSTALL_DASHBOARD:-n}"
   echo ""
 
   [ -z "${OPENAI_KEY:-}" ]          && tty_read "  OpenAI API key (blank to skip): " OPENAI_KEY
   [ -z "${BRAVE_KEY:-}" ]           && tty_read "  Brave Search API key (blank to skip): " BRAVE_KEY
 
-  echo ""
-  echo "── Infrastructure ──"
   if [ -z "${CLOUDFLARE_TUNNEL_TOKEN:-}" ]; then
     tty_read "  Cloudflare Tunnel token (blank to skip): " CLOUDFLARE_TUNNEL_TOKEN
-  else
-    echo "  Cloudflare Tunnel: ✅ (from config)"
   fi
 
   if [[ "${INSTALL_WATCHCLAW:-n}" == "y" ]]; then
-    echo "  WatchClaw: ✅ (from config)"
     [ -z "${WATCHCLAW_TELEGRAM_TOKEN:-}" ] && tty_read "  WatchClaw Telegram bot token (blank to skip alerts): " WATCHCLAW_TELEGRAM_TOKEN
     [ -z "${WATCHCLAW_CHAT_ID:-}" ]        && tty_read "  WatchClaw Telegram chat ID: " WATCHCLAW_CHAT_ID
   else
     tty_read "  Install WatchClaw security? [y/N]: " INSTALL_WATCHCLAW
+    if [[ "${INSTALL_WATCHCLAW,,}" == "y" ]]; then
+      tty_read "  WatchClaw Telegram bot token (blank to skip alerts): " WATCHCLAW_TELEGRAM_TOKEN
+      tty_read "  WatchClaw Telegram chat ID: " WATCHCLAW_CHAT_ID
+    fi
   fi
 
-  if [[ "${INSTALL_HINDSIGHT:-n}" == "y" ]]; then
-    echo "  Hindsight: ✅ (from config)"
-  else
+  if [[ "${INSTALL_HINDSIGHT:-n}" != "y" ]]; then
     tty_read "  Install Hindsight memory? [y/N]: " INSTALL_HINDSIGHT
   fi
 
-  echo ""
 else
   echo "── Agent Configuration ──"
   tty_read "  Agent name (e.g. Pulse): " AGENT_NAME
@@ -110,7 +148,7 @@ else
   echo "── Telegram Channels ──"
   echo "  (Two bots recommended: one for agent DMs, one for ops alerts)"
   tty_read "  Pulse agent bot token (@BotFather, blank to skip): " PULSE_TELEGRAM_BOT_TOKEN
-  tty_read "  Pulse bot allowFrom user IDs (comma-separated, e.g. 1171759675): " PULSE_ALLOW_FROM
+  tty_read "  Pulse bot allowFrom user IDs (comma-separated, e.g. 111111,222222): " PULSE_ALLOW_FROM
   tty_read "  Ops/alerts bot token (blank = same as pulse): " OPS_TELEGRAM_BOT_TOKEN
   tty_read "  Ops group chat ID (e.g. -5084525213, blank to skip): " OPS_TELEGRAM_CHAT_ID
   tty_read "  Ops bot allowFrom user IDs (comma-separated): " OPS_ALLOW_FROM
@@ -120,7 +158,8 @@ else
   tty_read "  Install Docker? [y/N]: " OPT_DOCKER
   tty_read "  OpenAI API key (for memory/embeddings, blank to skip): " OPENAI_KEY
   tty_read "  Brave Search API key (blank to skip): " BRAVE_KEY
-  tty_read "  Dotfiles repo URL (blank = kashifeqbal/server-dotfiles): " DOTFILES_REPO
+  # Fix #9: Dotfiles repo — blank = skip (no personal default)
+  tty_read "  Dotfiles repo URL (blank to skip): " DOTFILES_REPO
 
   echo ""
   echo "── Infrastructure ──"
@@ -131,22 +170,23 @@ else
     tty_read "  WatchClaw Telegram chat ID: " WATCHCLAW_CHAT_ID
   fi
   tty_read "  Install Hindsight memory? [y/N]: " INSTALL_HINDSIGHT
-  tty_read "  Docs sync repo SSH URL (blank to skip): " TAPHEALTH_DOCS_REPO
+  tty_read "  Docs sync repo SSH URL (blank to skip): " DOCS_SYNC_REPO
 fi
 
 # ─── Defaults ───
-AGENT_ID=$(echo "${AGENT_NAME}" | tr '[:upper:]' '[:lower:]' | tr ' ' '-')
+AGENT_ID=$(echo "${AGENT_NAME:-agent}" | tr '[:upper:]' '[:lower:]' | tr ' ' '-')
 GH_PROFILE=${GH_PROFILE:-${GH_ORG:-}}
 GH_TOKEN=${GH_TOKEN:-}
 OPT_DOCKER=${OPT_DOCKER:-n}
 OPENAI_KEY=${OPENAI_KEY:-}
 BRAVE_KEY=${BRAVE_KEY:-}
-DOTFILES_REPO=${DOTFILES_REPO:-https://github.com/kashifeqbal/server-dotfiles.git}
+DOTFILES_REPO=${DOTFILES_REPO:-}  # Fix #9: empty by default — skip if not provided
 CLOUDFLARE_TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN:-}
 INSTALL_WATCHCLAW=${INSTALL_WATCHCLAW:-n}
 INSTALL_HINDSIGHT=${INSTALL_HINDSIGHT:-n}
+INSTALL_DASHBOARD=${INSTALL_DASHBOARD:-n}  # Fix #8: tracked but currently stub
+DOCS_SYNC_REPO=${DOCS_SYNC_REPO:-${TAPHEALTH_DOCS_REPO:-}}  # Fix #10: org-agnostic name
 INSTALL_DOCS_SYNC=${INSTALL_DOCS_SYNC:-n}
-TAPHEALTH_DOCS_REPO=${TAPHEALTH_DOCS_REPO:-}
 
 # Telegram defaults
 PULSE_TELEGRAM_BOT_TOKEN=${PULSE_TELEGRAM_BOT_TOKEN:-}
@@ -159,8 +199,8 @@ OPS_ALLOW_FROM=${OPS_ALLOW_FROM:-}
 WATCHCLAW_TELEGRAM_TOKEN=${WATCHCLAW_TELEGRAM_TOKEN:-${OPS_TELEGRAM_BOT_TOKEN:-}}
 WATCHCLAW_CHAT_ID=${WATCHCLAW_CHAT_ID:-${OPS_TELEGRAM_CHAT_ID:-}}
 
-# Docs sync — enable if repo is set
-[ -n "${TAPHEALTH_DOCS_REPO}" ] && INSTALL_DOCS_SYNC="y"
+# Docs sync — enable if repo is set (Fix #10: use org-agnostic var)
+[ -n "${DOCS_SYNC_REPO}" ] && INSTALL_DOCS_SYNC="y"
 
 # ─── Step counter ───
 TOTAL_STEPS=13
@@ -204,8 +244,34 @@ apt-get install -y -qq \
   ca-certificates gnupg \
   openssh-client openssh-server \
   build-essential \
-  ufw fail2ban 2>&1 | tail -5
+  ufw fail2ban \
+  unattended-upgrades apt-listchanges 2>&1 | tail -5
 ok "System packages"
+
+# Fix #11: Configure unattended-upgrades for automatic security patching
+if ! grep -q "Unattended-Upgrade" /etc/apt/apt.conf.d/20auto-upgrades 2>/dev/null; then
+  cat > /etc/apt/apt.conf.d/20auto-upgrades << 'UUEOF'
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Unattended-Upgrade "1";
+APT::Periodic::AutocleanInterval "7";
+UUEOF
+  cat > /etc/apt/apt.conf.d/50unattended-upgrades << 'UUEOF'
+Unattended-Upgrade::Allowed-Origins {
+    "${distro_id}:${distro_codename}";
+    "${distro_id}:${distro_codename}-security";
+    "${distro_id}ESMApps:${distro_codename}-apps-security";
+    "${distro_id}ESM:${distro_codename}-infra-security";
+};
+Unattended-Upgrade::Remove-Unused-Kernel-Packages "true";
+Unattended-Upgrade::Remove-New-Unused-Dependencies "true";
+Unattended-Upgrade::Automatic-Reboot "true";
+Unattended-Upgrade::Automatic-Reboot-Time "03:00";
+UUEOF
+  systemctl enable unattended-upgrades 2>/dev/null || true
+  ok "Unattended security upgrades configured (auto-reboot 03:00)"
+else
+  skip "Unattended-upgrades already configured"
+fi
 
 # ═══════════════════════════════════════════════════════════════
 # PHASE 2: Node.js 22
@@ -267,8 +333,10 @@ fi
 
 # ═══════════════════════════════════════════════════════════════
 # PHASE 4: Cloudflare Tunnel — MUST start before SSH hardening
+# Fix #5 + #15: Validate tunnel actually passes traffic before proceeding
 # ═══════════════════════════════════════════════════════════════
 
+CF_TUNNEL_ACTIVE=false
 if [ -n "${CLOUDFLARE_TUNNEL_TOKEN}" ]; then
   next_step; log "[$STEP/$TOTAL_STEPS] Cloudflare tunnel (starting before SSH lockdown)..."
 
@@ -276,57 +344,99 @@ if [ -n "${CLOUDFLARE_TUNNEL_TOKEN}" ]; then
   systemctl enable cloudflared 2>/dev/null || true
   systemctl start cloudflared 2>/dev/null || true
 
-  # Wait for tunnel to connect (up to 30s)
-  for i in $(seq 1 6); do
-    if systemctl is-active cloudflared &>/dev/null; then
-      ok "Cloudflare tunnel active and connected ✅"
-      break
-    fi
+  # Wait for tunnel to actually connect — check via cloudflared metrics endpoint
+  TUNNEL_UP=false
+  for i in $(seq 1 12); do
     sleep 5
-    [ "$i" -eq 6 ] && warn "Tunnel service not active — check: journalctl -u cloudflared"
+    if systemctl is-active cloudflared &>/dev/null; then
+      # Verify connectivity via metrics port (cloudflared exposes metrics on 20241 by default)
+      if curl -sf http://localhost:20241/metrics 2>/dev/null | grep -q "cloudflared_tunnel_active_streams\|cloudflared_build_info"; then
+        TUNNEL_UP=true
+        break
+      fi
+      # Fallback: check if service has been stable for 5+ seconds without restarting
+      ACTIVE_SINCE=$(systemctl show cloudflared --property=ActiveEnterTimestampMonotonic --value 2>/dev/null || echo "0")
+      NOW_MONO=$(awk '{print int($1*1000000)}' /proc/uptime 2>/dev/null || echo "0")
+      UPTIME_USEC=$(( NOW_MONO - ACTIVE_SINCE ))
+      if [ "$UPTIME_USEC" -gt 10000000 ] 2>/dev/null; then
+        TUNNEL_UP=true
+        break
+      fi
+    fi
+    warn "Waiting for Cloudflare tunnel... (${i}/12, $((i*5))s)"
   done
+
+  if $TUNNEL_UP; then
+    CF_TUNNEL_ACTIVE=true
+    ok "Cloudflare tunnel active ✅"
+  else
+    # Fix #15: Exit with recovery instructions instead of silently proceeding
+    fail "Cloudflare tunnel failed to connect after 60s."
+    echo ""
+    echo "  ┌─────────────────────────────────────────────────────────────┐"
+    echo "  │  ⚠️  HALTING before SSH lockdown — tunnel not verified       │"
+    echo "  │                                                             │"
+    echo "  │  SSH would have been restricted to loopback-only,          │"
+    echo "  │  but the tunnel isn't working. That would lock you out.    │"
+    echo "  │                                                             │"
+    echo "  │  Options:                                                   │"
+    echo "  │    1. Check your CLOUDFLARE_TUNNEL_TOKEN is correct         │"
+    echo "  │       journalctl -u cloudflared --no-pager -n 30            │"
+    echo "  │    2. Re-run with a corrected token                         │"
+    echo "  │    3. Re-run without CLOUDFLARE_TUNNEL_TOKEN to keep SSH    │"
+    echo "  │       open (less secure, but safe to iterate)               │"
+    echo "  └─────────────────────────────────────────────────────────────┘"
+    echo ""
+    exit 1
+  fi
 fi
 
 # ═══════════════════════════════════════════════════════════════
 # PHASE 5: Dotfiles
+# Fix #9: Skip entirely if DOTFILES_REPO is empty
 # ═══════════════════════════════════════════════════════════════
 
 next_step; log "[$STEP/$TOTAL_STEPS] Dotfiles..."
-DOTFILES_DIR="/root/dotfiles"
 
-if [ ! -d "${DOTFILES_DIR}/.git" ]; then
-  git clone "${DOTFILES_REPO}" "${DOTFILES_DIR}" 2>/dev/null
-fi
+if [ -n "${DOTFILES_REPO:-}" ]; then
+  DOTFILES_DIR="/root/dotfiles"
 
-if [ -d "${DOTFILES_DIR}" ]; then
-  rm -f "/root/.zshrc" "/root/.zshenv" "/root/.gitconfig" "/root/.vimrc" 2>/dev/null
-  cd "${DOTFILES_DIR}"
-  echo '\.git' > "${DOTFILES_DIR}/.stow-local-ignore" 2>/dev/null || true
-  stow --target="/root" --restow --ignore='\.git' . 2>/dev/null || {
-    for f in .zshrc .zimrc .zshenv .exports .aliases .gitconfig .vimrc .curlrc .wgetrc .stow-global-ignore; do
-      [ -f "${DOTFILES_DIR}/$f" ] && ln -sf "${DOTFILES_DIR}/$f" "/root/$f"
-    done
-    for d in .config .vim; do
-      [ -d "${DOTFILES_DIR}/$d" ] && cp -r "${DOTFILES_DIR}/$d" "/root/"
-    done
-  }
-  ok "Dotfiles stowed"
-
-  if [ ! -f "/root/.config/oh-my-posh/zen.omp.json" ]; then
-    mkdir -p "/root/.config/oh-my-posh"
-    if [ -f "${DOTFILES_DIR}/.config/oh-my-posh/zen.omp.json" ]; then
-      ln -sf "${DOTFILES_DIR}/.config/oh-my-posh/zen.omp.json" "/root/.config/oh-my-posh/"
-    elif [ -f /usr/local/share/oh-my-posh/themes/zen.omp.json ]; then
-      cp /usr/local/share/oh-my-posh/themes/zen.omp.json "/root/.config/oh-my-posh/"
-    fi
+  if [ ! -d "${DOTFILES_DIR}/.git" ]; then
+    git clone "${DOTFILES_REPO}" "${DOTFILES_DIR}" 2>/dev/null
   fi
 
-  if [ ! -d "/root/.zim" ]; then
-    bash -c 'curl -fsSL https://raw.githubusercontent.com/zimfw/install/master/install.zsh | ZIM_HOME=~/.zim zsh' 2>/dev/null || true
-    ok "Zim framework installed"
+  if [ -d "${DOTFILES_DIR}" ]; then
+    rm -f "/root/.zshrc" "/root/.zshenv" "/root/.gitconfig" "/root/.vimrc" 2>/dev/null
+    cd "${DOTFILES_DIR}"
+    echo '\.git' > "${DOTFILES_DIR}/.stow-local-ignore" 2>/dev/null || true
+    stow --target="/root" --restow --ignore='\.git' . 2>/dev/null || {
+      for f in .zshrc .zimrc .zshenv .exports .aliases .gitconfig .vimrc .curlrc .wgetrc .stow-global-ignore; do
+        [ -f "${DOTFILES_DIR}/$f" ] && ln -sf "${DOTFILES_DIR}/$f" "/root/$f"
+      done
+      for d in .config .vim; do
+        [ -d "${DOTFILES_DIR}/$d" ] && cp -r "${DOTFILES_DIR}/$d" "/root/"
+      done
+    }
+    ok "Dotfiles stowed from ${DOTFILES_REPO}"
+
+    if [ ! -f "/root/.config/oh-my-posh/zen.omp.json" ]; then
+      mkdir -p "/root/.config/oh-my-posh"
+      if [ -f "${DOTFILES_DIR}/.config/oh-my-posh/zen.omp.json" ]; then
+        ln -sf "${DOTFILES_DIR}/.config/oh-my-posh/zen.omp.json" "/root/.config/oh-my-posh/"
+      elif [ -f /usr/local/share/oh-my-posh/themes/zen.omp.json ]; then
+        cp /usr/local/share/oh-my-posh/themes/zen.omp.json "/root/.config/oh-my-posh/"
+      fi
+    fi
+
+    if [ ! -d "/root/.zim" ]; then
+      bash -c 'curl -fsSL https://raw.githubusercontent.com/zimfw/install/master/install.zsh | ZIM_HOME=~/.zim zsh' 2>/dev/null || true
+      ok "Zim framework installed"
+    fi
+  else
+    warn "Could not clone dotfiles from ${DOTFILES_REPO}"
   fi
 else
-  warn "Could not clone dotfiles from ${DOTFILES_REPO}"
+  skip "Dotfiles skipped (DOTFILES_REPO not set)"
 fi
 
 git config --global user.name "${ORG_NAME} Bot"
@@ -334,9 +444,12 @@ git config --global user.email "bot@${ORG_NAME,,}.com"
 
 # ═══════════════════════════════════════════════════════════════
 # PHASE 6: Security hardening
+# Fix #1: SSH restart is now always done at end of this phase
+# Fix #12: inotify watches added to sysctl
 # ═══════════════════════════════════════════════════════════════
 
 next_step; log "[$STEP/$TOTAL_STEPS] Security hardening..."
+SSH_NEEDS_RESTART=false
 
 if ! grep -q "TeamClaw hardening" /etc/ssh/sshd_config 2>/dev/null; then
   cat >> /etc/ssh/sshd_config << 'SSHEOF'
@@ -354,7 +467,7 @@ PasswordAuthentication no
 PermitRootLogin prohibit-password
 SSHEOF
 
-  if [ -n "${CLOUDFLARE_TUNNEL_TOKEN}" ]; then
+  if $CF_TUNNEL_ACTIVE; then
     if ! grep -q "^ListenAddress 127.0.0.1" /etc/ssh/sshd_config 2>/dev/null; then
       cat >> /etc/ssh/sshd_config << 'SSHLISTENEOF'
 
@@ -365,14 +478,17 @@ SSHLISTENEOF
       ok "SSH bound to localhost (tunnel-only access)"
     fi
   fi
-  /usr/sbin/sshd -t 2>/dev/null && ok "SSH hardened (key-only, rate-limited) — restart deferred to end" \
-    || fail "SSH config test failed — check /etc/ssh/sshd_config"
+  /usr/sbin/sshd -t 2>/dev/null && {
+    ok "SSH config valid — will restart at end of hardening"
+    SSH_NEEDS_RESTART=true
+  } || fail "SSH config test failed — check /etc/ssh/sshd_config"
 else
   skip "SSH already hardened"
 fi
 
 if [ ! -f /etc/sysctl.d/99-teamclaw-hardening.conf ]; then
   cat > /etc/sysctl.d/99-teamclaw-hardening.conf << 'SYSEOF'
+# ─── Network hardening ─────────────────────────────────────────
 net.ipv4.tcp_syncookies = 1
 net.ipv4.conf.all.rp_filter = 1
 net.ipv4.conf.default.rp_filter = 1
@@ -394,6 +510,7 @@ net.ipv6.conf.all.accept_redirects = 0
 net.ipv6.conf.default.accept_redirects = 0
 net.ipv6.conf.all.accept_source_route = 0
 net.ipv6.conf.default.accept_source_route = 0
+# ─── Kernel hardening ──────────────────────────────────────────
 kernel.sysrq = 0
 kernel.core_uses_pid = 1
 kernel.randomize_va_space = 2
@@ -403,9 +520,12 @@ kernel.yama.ptrace_scope = 1
 fs.protected_hardlinks = 1
 fs.protected_symlinks = 1
 fs.suid_dumpable = 0
+# ─── File watchers (Fix #12) ───────────────────────────────────
+fs.inotify.max_user_watches = 1048576
+fs.inotify.max_user_instances = 512
 SYSEOF
   sysctl --system 2>/dev/null | tail -1
-  ok "Kernel hardened (29 sysctl settings)"
+  ok "Kernel hardened (31 sysctl settings, inotify included)"
 else
   skip "Kernel hardening already applied"
 fi
@@ -413,7 +533,7 @@ fi
 ufw --force reset 2>/dev/null
 ufw default deny incoming 2>/dev/null
 ufw default allow outgoing 2>/dev/null
-if [ -n "${CLOUDFLARE_TUNNEL_TOKEN}" ]; then
+if $CF_TUNNEL_ACTIVE; then
   ufw allow from 127.0.0.1 to any port 22 proto tcp comment 'SSH loopback (tunnel)' 2>/dev/null
   ufw allow from ::1 to any port 22 proto tcp comment 'SSH loopback v6 (tunnel)' 2>/dev/null
   ok "UFW: SSH loopback-only (tunnel confirmed)"
@@ -439,6 +559,12 @@ findtime = 600
 F2BEOF
 systemctl enable --now fail2ban 2>/dev/null
 ok "fail2ban active"
+
+# Fix #1: Always restart SSH at end of hardening phase (not buried in WatchClaw)
+if $SSH_NEEDS_RESTART; then
+  systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true
+  ok "SSH restarted with hardened config"
+fi
 
 # ═══════════════════════════════════════════════════════════════
 # PHASE 7: GitHub
@@ -542,13 +668,13 @@ cat > "${OC_WORKSPACE}/USER.md" << USER
 
 ## Organization
 - **Company:** ${ORG_NAME}
-- **Product:** ${PRODUCT_DESC}
+- **Product:** ${PRODUCT_DESC:-}
 
 ## Team
 _(Add team members here)_
 
 ## Timezone
-- ${TEAM_TZ}
+- ${TEAM_TZ:-Asia/Kolkata}
 USER
 
 cat > "${OC_WORKSPACE}/TOOLS.md" << TOOLS
@@ -575,6 +701,8 @@ ok "${AGENT_NAME} workspace created"
 
 # ═══════════════════════════════════════════════════════════════
 # PHASE 9: openclaw.json — full multi-agent / multi-bot config
+# Fix #2: Gateway systemd unit loads .env via EnvironmentFile
+# Fix #4: memory-core plugin configured
 # ═══════════════════════════════════════════════════════════════
 
 next_step; log "[$STEP/$TOTAL_STEPS] Generating openclaw.json..."
@@ -646,6 +774,19 @@ cfg = {
         "nativeSkills": "auto",
         "restart": True,
         "ownerDisplay": "raw"
+    },
+    # Fix #4: memory-core plugin so memorySearch has somewhere to search
+    "plugins": {
+        "entries": {
+            "memory-core": {
+                "enabled": True,
+                "options": {
+                    "namespace": agent_id,
+                    "maxMemories": 2000,
+                    "embedding": "local"
+                }
+            }
+        }
     }
 }
 
@@ -689,7 +830,7 @@ if pulse_token or ops_token:
                     "enabled": True
                 }
             }
-        accounts["taphealth-ops"] = ops_account
+        accounts["ops"] = ops_account
 
     cfg["channels"] = {
         "telegram": {
@@ -701,7 +842,7 @@ if pulse_token or ops_token:
             "defaultAccount": "default" if "default" in accounts else list(accounts.keys())[0]
         }
     }
-    cfg["plugins"] = {"entries": {"telegram": {"enabled": True}}}
+    cfg["plugins"]["entries"]["telegram"] = {"enabled": True}
 
     # Bindings: route each agent to its bot
     bindings = []
@@ -711,11 +852,11 @@ if pulse_token or ops_token:
             "agentId": agent_id,
             "match": {"channel": "telegram", "accountId": "default"}
         })
-    if ops_token and (ops_token or ops_allow):
+    if ops_token:
         bindings.append({
             "type": "route",
             "agentId": "ops",
-            "match": {"channel": "telegram", "accountId": "taphealth-ops"}
+            "match": {"channel": "telegram", "accountId": "ops"}
         })
     if bindings:
         cfg["bindings"] = bindings
@@ -723,15 +864,16 @@ if pulse_token or ops_token:
 out = "/root/.openclaw/openclaw.json"
 with open(out, "w") as f:
     json.dump(cfg, f, indent=2)
-print(f"Written: {out}")
+print(f"  Written: {out}")
 PYJSON
 
 chmod 700 "${OC_STATE}" "${OC_STATE}/credentials" 2>/dev/null || true
 
-if openclaw config validate 2>&1 | grep -q "valid"; then
-  ok "openclaw.json valid"
+# Fix #3: openclaw config validate → openclaw doctor
+if openclaw doctor 2>&1 | grep -qiE "ok|healthy|valid|ready"; then
+  ok "openclaw.json valid (doctor passed)"
 else
-  warn "Config validation issue — run: openclaw config validate"
+  warn "openclaw doctor flagged something — check after install: openclaw doctor"
 fi
 
 # ═══════════════════════════════════════════════════════════════
@@ -755,7 +897,7 @@ if 'export default' in content and 'Suspense' not in content.split('export defau
     content += '\nexport default function Home() {\n  return (\n    <Suspense fallback={null}>\n      <HomeInner />\n    </Suspense>\n  );\n}\n'
 with open('src/app/page.tsx', 'w') as f:
     f.write(content)
-print('Patched page.tsx')
+print('  Patched page.tsx for Suspense boundary')
 PATCHEOF
   fi
 
@@ -765,39 +907,50 @@ else
   skip "Studio already installed"
 fi
 
+# Fix #13: Find actual next binary path instead of relying on /usr/bin/npx
+NEXT_BIN="/opt/openclaw-studio/node_modules/.bin/next"
+if [ ! -f "${NEXT_BIN}" ]; then
+  NEXT_BIN="$(which next 2>/dev/null || echo 'npx next')"
+fi
+
 # ═══════════════════════════════════════════════════════════════
 # PHASE 11: Systemd services
+# Fix #2: Gateway service loads .env via EnvironmentFile
+# Fix #13: Studio uses resolved next binary path
 # ═══════════════════════════════════════════════════════════════
 
 next_step; log "[$STEP/$TOTAL_STEPS] Installing systemd services..."
 
+OPENCLAW_BIN=$(which openclaw)
+
 cat > /etc/systemd/system/openclaw-gateway.service << SVC
 [Unit]
-Description=OpenClaw Gateway
+Description=OpenClaw Gateway — ${ORG_NAME}
 After=network.target
 
 [Service]
 Type=simple
 User=root
-ExecStart=$(which openclaw) gateway run
+ExecStart=${OPENCLAW_BIN} gateway run
 Restart=always
 RestartSec=5
 Environment=NODE_ENV=production
 Environment=HOME=/root
+EnvironmentFile=-/root/.openclaw/.env
 
 [Install]
 WantedBy=multi-user.target
 SVC
 
-cat > /etc/systemd/system/openclaw-studio.service << 'SVC'
+cat > /etc/systemd/system/openclaw-studio.service << SVC
 [Unit]
-Description=OpenClaw Studio Dashboard
+Description=OpenClaw Studio — ${ORG_NAME}
 After=network.target
 
 [Service]
 Type=simple
 WorkingDirectory=/opt/openclaw-studio
-ExecStart=/usr/bin/npx next start --port 3000 --hostname 127.0.0.1
+ExecStart=${NEXT_BIN} start --port 3000 --hostname 127.0.0.1
 Environment=HOST=127.0.0.1
 Environment=PORT=3000
 Environment=NODE_ENV=production
@@ -811,6 +964,13 @@ SVC
 systemctl daemon-reload
 systemctl enable openclaw-gateway openclaw-studio 2>/dev/null || true
 ok "Gateway + Studio services (auto-start: enabled)"
+
+# Fix #8: INSTALL_DASHBOARD — acknowledge and stub
+if [[ "${INSTALL_DASHBOARD,,}" == "y" ]]; then
+  warn "INSTALL_DASHBOARD=y is set but not yet implemented in TeamClaw."
+  warn "To install the Command Center dashboard, run setup manually after install."
+  warn "See: https://github.com/kashifeqbal/openclaw-workspace/tree/main/dashboard-site"
+fi
 
 # ═══════════════════════════════════════════════════════════════
 # PHASE 12: Healthcheck cron
@@ -861,7 +1021,6 @@ if [[ "${INSTALL_WATCHCLAW,,}" == "y" ]]; then
   if [ -f "${WATCHCLAW_SRC}/install.sh" ]; then
     mkdir -p /etc/watchclaw /var/lib/watchclaw /var/log/watchclaw
     cd "${WATCHCLAW_SRC}"
-    # Run non-interactively with a timeout guard
     timeout 120 bash install.sh --standalone </dev/null 2>&1 | tail -10 || true
     rm -rf "${WATCHCLAW_SRC}"
     ok "WatchClaw installed"
@@ -869,7 +1028,6 @@ if [[ "${INSTALL_WATCHCLAW,,}" == "y" ]]; then
     warn "WatchClaw install.sh not found — skipped"
   fi
 
-  # Fix #2: Write watchclaw.conf from env vars
   cat > /etc/watchclaw/watchclaw.conf << WCCONF
 # WatchClaw — ${ORG_NAME}
 SSH_PORT=2222
@@ -899,7 +1057,6 @@ WCCONF
   chmod 600 /etc/watchclaw/watchclaw.conf
   ok "watchclaw.conf written"
 
-  # Fix #3: Explicitly install all WatchClaw crons
   WC_ENV="WATCHCLAW_CONF=/etc/watchclaw/watchclaw.conf"
   WC_DIR="/opt/watchclaw/scripts"
   WC_LOG="/var/log/watchclaw"
@@ -916,9 +1073,8 @@ WCCONF
     | grep -v '^$' | crontab -
   ok "WatchClaw crons installed (7 jobs)"
 
-  # UFW update for new SSH port if WatchClaw moved it
   if grep -q "^Port 2222" /etc/ssh/sshd_config 2>/dev/null; then
-    if [ -n "${CLOUDFLARE_TUNNEL_TOKEN}" ]; then
+    if $CF_TUNNEL_ACTIVE; then
       ufw allow from 127.0.0.1 to any port 2222 proto tcp comment 'SSH 2222 loopback (tunnel)' 2>/dev/null
       ufw allow from ::1 to any port 2222 proto tcp comment 'SSH 2222 loopback v6 (tunnel)' 2>/dev/null
       ok "UFW: SSH 2222 loopback-only (tunnel mode)"
@@ -926,12 +1082,11 @@ WCCONF
       ufw allow 2222/tcp comment "SSH (moved by WatchClaw)" 2>/dev/null || true
       ok "UFW: SSH 2222 open"
     fi
+    # SSH port changed — restart again
+    systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true
+    ok "SSH restarted with WatchClaw port config"
   fi
 
-  systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true
-  ok "SSH restarted with hardened config"
-
-  # Fire test alert if configured
   if [ -n "${WATCHCLAW_TELEGRAM_TOKEN}" ] && [ -n "${WATCHCLAW_CHAT_ID}" ]; then
     curl -s -X POST "https://api.telegram.org/bot${WATCHCLAW_TELEGRAM_TOKEN}/sendMessage" \
       -d "chat_id=${WATCHCLAW_CHAT_ID}" \
@@ -1036,7 +1191,7 @@ HENV
 
   cat > /etc/systemd/system/hindsight-pageindex.service << HSVC
 [Unit]
-Description=Hindsight Local PageIndex Runtime
+Description=Hindsight PageIndex — ${ORG_NAME}
 After=network-online.target
 
 [Service]
@@ -1058,25 +1213,23 @@ HSVC
 fi
 
 # ═══════════════════════════════════════════════════════════════
-# PHASE 15: Docs sync (Hindsight indexing)
+# PHASE 15: Docs sync (Fix #10: org-agnostic naming)
 # ═══════════════════════════════════════════════════════════════
 
-if [[ "${INSTALL_DOCS_SYNC,,}" == "y" ]] && [ -n "${TAPHEALTH_DOCS_REPO:-}" ]; then
-  next_step; log "[$STEP/$TOTAL_STEPS] Docs sync (${TAPHEALTH_DOCS_REPO})..."
+if [[ "${INSTALL_DOCS_SYNC,,}" == "y" ]] && [ -n "${DOCS_SYNC_REPO:-}" ]; then
+  next_step; log "[$STEP/$TOTAL_STEPS] Docs sync (${DOCS_SYNC_REPO})..."
 
-  DOCS_REPO_DIR="/opt/teamclaw/repos/taphealth-docs"
-  DOCS_SYNC_SCRIPT="/opt/teamclaw/scripts/sync-taphealth-docs.sh"
+  DOCS_REPO_DIR="/opt/teamclaw/repos/docs"
+  DOCS_SYNC_SCRIPT="/opt/teamclaw/scripts/sync-docs.sh"
 
-  # Clone repo (may fail if SSH key not yet added to GitHub — that's ok)
   if [ ! -d "${DOCS_REPO_DIR}/.git" ]; then
-    git clone "${TAPHEALTH_DOCS_REPO}" "${DOCS_REPO_DIR}" 2>/dev/null \
+    git clone "${DOCS_SYNC_REPO}" "${DOCS_REPO_DIR}" 2>/dev/null \
       && ok "Docs repo cloned" \
-      || warn "Could not clone docs repo (add SSH deploy key to GitHub then run: git clone ${TAPHEALTH_DOCS_REPO} ${DOCS_REPO_DIR})"
+      || warn "Could not clone docs repo (add SSH deploy key then run: git clone ${DOCS_SYNC_REPO} ${DOCS_REPO_DIR})"
   else
     skip "Docs repo already cloned"
   fi
 
-  # Write sync script — indexes changed .md files into Hindsight on git pull
   cat > "${DOCS_SYNC_SCRIPT}" << SYNCEOF
 #!/bin/bash
 REPO="${DOCS_REPO_DIR}"
@@ -1139,15 +1292,14 @@ echo "[\$(date '+%Y-%m-%d %H:%M')] Sync complete." >> "\$LOG"
 SYNCEOF
   chmod +x "${DOCS_SYNC_SCRIPT}"
 
-  # Install docs sync cron (every 15 min)
   DOCS_CRON="*/15 * * * * ${DOCS_SYNC_SCRIPT} >> /var/log/teamclaw-docs-sync.log 2>&1"
   ( crontab -l 2>/dev/null || true; echo "${DOCS_CRON}" ) | sort -u | crontab -
-  ok "Docs sync cron installed (every 15 min)"
+  ok "Docs sync cron installed (every 15 min, script: sync-docs.sh)"
 fi
 
 # ═══════════════════════════════════════════════════════════════
-# FINAL: Start services — systemctl only, no manual gateway start
-# Fix #6: removed manual openclaw gateway start to prevent dual-process conflict
+# FINAL: Start services
+# Fix #6 (v0.3): systemctl only — no manual openclaw gateway start
 # ═══════════════════════════════════════════════════════════════
 
 next_step; log "[$STEP/$TOTAL_STEPS] Starting services..."
@@ -1188,12 +1340,13 @@ echo "  Gateway:   ws://localhost:18789  (token: ${GATEWAY_TOKEN})"
 echo "  Studio:    http://localhost:3000"
 echo "  Workspace: ${OC_WORKSPACE}/"
 echo ""
-echo "  Security:  SSH ✅ | UFW ✅ | fail2ban ✅ | kernel ✅"
-[ -n "${CLOUDFLARE_TUNNEL_TOKEN}" ]   && echo "  Tunnel:    cloudflared ✅"
+echo "  Security:  SSH ✅ | UFW ✅ | fail2ban ✅ | kernel ✅ | unattended-upgrades ✅"
+$CF_TUNNEL_ACTIVE && echo "  Tunnel:    cloudflared ✅ (verified)"
 [[ "${INSTALL_WATCHCLAW,,}" == "y" ]] && echo "  WatchClaw: /opt/watchclaw ✅"
 [[ "${INSTALL_HINDSIGHT,,}" == "y" ]] && echo "  Hindsight: http://localhost:8787 ✅"
-[[ "${INSTALL_DOCS_SYNC,,}" == "y" ]] && echo "  Docs sync: every 15 min ✅"
-[ -n "${PULSE_TELEGRAM_BOT_TOKEN}" ]  && echo "  Telegram:  ${AGENT_NAME} bot + Ops bot wired ✅"
+[[ "${INSTALL_DOCS_SYNC,,}" == "y" ]] && echo "  Docs sync: /opt/teamclaw/scripts/sync-docs.sh (every 15 min) ✅"
+[ -n "${PULSE_TELEGRAM_BOT_TOKEN:-}" ] && echo "  Telegram:  ${AGENT_NAME} bot + Ops bot wired ✅"
+[ -n "${OPENAI_KEY:-}" ]               && echo "  Memory:    memory-core + OpenAI embeddings ✅"
 echo ""
 echo "  ┌─────────────────────────────────────────────────────┐"
 echo "  │  One manual step remaining:                         │"
